@@ -1,61 +1,114 @@
 # Spotify Floating Lyric
 
-A Rust + GTK4 desktop app for Ubuntu GNOME. The first milestone is a **mock
-lyrics window**: it shows original sample text and lets you select the current
-line with Previous and Next. It does not connect to Spotify or fetch lyrics yet.
+A Rust + GTK4 desktop app for Ubuntu GNOME. It observes Spotify playback through
+MPRIS and shows the current title, artists, playback status, and elapsed
+position. The original four lines of sample text remain as an independent mock
+lyrics demonstration; they are unrelated to the current Spotify track.
 
-The project also teaches agent harness development through bounded planning,
-delegated implementation, executable checks, independent review, and recorded
-desktop observations. Start with [the harness bootstrap](docs/harness/bootstrap.md)
-and [milestone 001](docs/plans/001-mock-window.md).
+The app does not fetch lyrics or control Spotify. It keeps a normal resizable
+window with GNOME decorations and does not automatically pin itself, click
+through windows, or move across workspaces.
 
 ## Build prerequisites
 
-On Ubuntu 26.04, install the compiler, Cargo tools and GTK4 development files in
-your terminal:
+On Ubuntu, install Rust, Cargo, and GTK4 development files:
 
 ```sh
 sudo apt-get install rustc cargo rustfmt rust-clippy libgtk-4-dev
 ```
 
-The app declares Rust 1.93 and uses gtk-rs GTK4 bindings. Build dependencies are
-downloaded by Cargo on the first build. See the [gtk-rs introduction](https://gtk-rs.org/gtk4-rs/stable/latest/book/hello_world.html)
-for the application lifecycle used here.
+The project declares Rust 1.93 and uses GTK4's re-exported GIO APIs for MPRIS.
+Cargo.lock is committed; keep it with the application source.
 
-## Run the demo
-
-For the initial bootstrap, generate the application lockfile if it is not yet
-present, then build and run:
+## Run the app
 
 ```sh
-cargo generate-lockfile
 cargo run --locked
 ```
 
-Retain and commit Cargo.lock. Once it exists, normal runs should use
-`cargo run --locked` without regenerating it. The normal title bar provides the
-close control, the window can be resized, and the sample lines wrap. Previous
-and Next cycle through the four lines, emphasizing the selected line.
+If Spotify is stopped, the playback section says it is not running. When
+Spotify appears on the session bus, the app displays its current state and
+clears it again when Spotify exits. Position updates while playback is active;
+the elapsed value includes the duration when Spotify provides one. Missing
+track fields are shown as unknown. The mock sample remains available in every
+playback state, and Previous/Next wrap around its four lines.
+
+The current Spotify title and artists are rendered as plain text. The sample
+heading and notice keep that text separate from Spotify metadata.
 
 ## Keep the window visible
 
-On GNOME Wayland, open the window menu from the title bar or with **Alt+Space**,
-then select **Always on Top** if offered. Switch to your editor or browser to
-check the behavior on your laptop. The app keeps a normal header bar for this
-interaction; it does not programmatically pin itself.
+Use GNOME's ordinary title-bar menu or **Alt+Space** to pin the window manually
+if the desktop offers that option. The app does not promise behavior above
+fullscreen windows or across workspaces, and does not implement transparency
+or click-through.
 
-The initial milestone does not promise behavior above fullscreen windows or
-across workspaces, and does not implement transparency or click-through.
+## Verify the source
 
-## Verify
-
-After dependencies and Cargo.lock are available:
+Run the repository verification and harness checks:
 
 ```sh
 bash scripts/verify.sh
+python3 scripts/test-harness.py
 ```
 
-This checks formatting, a locked build, Clippy with warnings denied, and the
-available tests. The initial demo has no automated UI tests. Compilation and
-linting do not establish that the window launches, closes, resizes correctly, or
-stays above other apps: follow and record the desktop checklist in milestone 001.
+The focused UI time-format tests can be run with:
+
+```sh
+cargo test --locked --lib ui::tests
+```
+
+The fake MPRIS service protocol test uses an isolated session bus:
+
+```sh
+dbus-run-session -- cargo test --locked --test mpris_protocol -- --test-threads=1
+```
+
+Compilation, unit tests, and fake-service protocol tests do not establish that
+the app behaves correctly with a running Spotify installation or GNOME's
+window manager.
+
+## Render the GTK content
+
+On a graphical session, render the shared app UI into PNG files:
+
+```sh
+cargo run --locked --example render_playback
+```
+
+The helper captures disconnected, playing with long metadata, paused, and
+narrow-window states under `target/playback-renders/`. It checks that the
+Previous and Next button signals preserve selection and wrap between the first
+and last sample lines. The helper waits for GTK layout and frame readiness,
+then uses `WidgetPaintable`, `Snapshot`, GSK, and a PNG texture export. It exits
+with an error if layout, rendering, or writing a file fails.
+
+To also capture the live observer's current view from the session bus, run:
+
+```sh
+cargo run --locked --example render_playback -- --live
+```
+
+This still writes the synthetic captures and adds `live.png`. The live image
+uses whatever Spotify reports at capture time. Rendered content can be reviewed
+for wrapping and clipping, but does not show compositor decorations, focus,
+window-menu behavior, pinning, or cross-workspace behavior.
+
+## Check against actual Spotify
+
+On Ubuntu GNOME with Spotify installed, run `cargo run --locked` and observe:
+
+1. Launch the app while Spotify is stopped and confirm its waiting state.
+2. Start Spotify and confirm title, artists, status, and position appear.
+3. Change tracks; confirm metadata changes and elapsed position resets.
+4. Pause and resume; confirm status changes and position stays still while paused.
+5. Seek in Spotify and confirm the displayed position follows.
+6. Close Spotify and confirm its metadata and moving position clear.
+7. Restart Spotify and confirm the app reacquires the current state.
+8. Resize the window; check wrapping, mock Previous/Next behavior, and normal
+   GNOME window decorations.
+9. Close the app normally and confirm its process exits.
+
+Record live Spotify and desktop observations separately from the isolated fake
+service test and GTK render images. If Spotify or GNOME is unavailable, report
+those desktop observations as not run rather than inferring them from a render.
