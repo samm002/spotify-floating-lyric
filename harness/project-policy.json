@@ -1,0 +1,25 @@
+{
+  "goal_source": "markdown",
+  "target_branch": "development",
+  "platform": "github",
+  "concurrency": 1,
+  "auto_merge": false,
+  "review_mode": "inline",
+  "review_max_iterations": 0,
+  "max_rework": 3,
+  "max_escalations": 2,
+  "max_verify_retries": 3,
+  "visual_mode": "auto",
+  "worker_lifecycle": "terminal_observation",
+  "branch_flow": {
+    "integration_branch": "development",
+    "release_branch": "main"
+  },
+  "issue_list_url": "https://github.com/samm002/spotify-floating-lyric/issues",
+  "issue_limit": 3,
+  "markdown_pr_strategy": "auto",
+  "max_tasks_per_pr": 3,
+  "max_files_per_pr": 25,
+  "max_parallel_prs": 1,
+  "figma_enabled": false
+}

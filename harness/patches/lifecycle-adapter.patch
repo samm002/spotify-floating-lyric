@@ -1,0 +1,748 @@
+--- a/.agents/skills/goal/SKILL.md
++++ b/.agents/skills/goal/SKILL.md
+@@ -9,7 +9,7 @@
+ You are the sole coordinator. Spawn workers directly; do not spawn an orchestrator.
+ Do not edit application source in MAIN. Do not edit `.codex/scripts` during a run.
+ 
+-Before the first worker: `codex ensure-user-config` via the helper. Use only the
++Native dispatch needs a trusted project; use `codex ensure-user-config` only if the user authorized global trust changes. Terminal observation dispatch uses explicit role briefs and does not require that mutation. Use only the
+ absolute `GOAL_GIT` returned by `context --json` (always the project-root helper).
+ Carry every selector on every invocation:
+ 
+@@ -30,16 +30,20 @@
+ (`state complete` / `issues finish`), or a blocker is saved with
+ `"$GOAL_GIT" harness event blocker "<reason>"`. After every worker returns:
+ `spawn-finish`, record its result, then run `harness status` and take its
+-`next_action`. Every helper error carries a `corrective_action`: run it. Stop only
+-for authentication/permission errors or a missing delegation capability.
+-On resume run `harness reap` first, then `harness status`. An interrupted `spawn_agent` child
+-(closed window, killed session) leaves its reservation held: `harness reap` releases it
+-and returns its task to PENDING for a fresh launch.
++`next_action`. Every helper error carries a `corrective_action`: run it. Save a blocker
++for authentication/permission errors, missing delegation, or unobservable terminal
++completion; never bypass a rejected lifecycle transition.
++On resume inspect `harness status` and the frozen reservation modes. Use
++`harness reap` only for native stale reservations. Interrupted observer launches
++stay held until confirmed or conclusively shown not to have launched; confirmed
++observer workers require real terminal observation before retry.
+ 
+-A Stop hook (`harness stop-check`) enforces this: while this platform's goal is
+-unfinished it blocks the stop and returns the `next_action`. It allows the stop
+-after a saved blocker, `harness done`, a forge auth error, or three blocks in a
+-row without any state change.
++When enabled, trusted, and verified to execute, the Stop hook
++(`harness stop-check`) can keep an unfinished goal running by returning its
++`next_action`. This project initially leaves hooks disabled; installed hook files
++are not execution evidence. MAIN must explicitly follow helper gates and status.
++The hook allows stopping after a saved blocker, `harness done`, a forge auth error,
++or three blocks without a state change.
+ 
+ ## Dispatch
+ 
+@@ -63,27 +67,21 @@
+ Then follow [execution](references/execution.md). For Markdown multi-PR also read
+ [delivery-groups](references/delivery-groups.md).
+ 
+-## Worker launch (exact recipe)
++## Worker launch
+ 
+-1. `models <role> --complexity <LEVEL> [--require-multimodal]`
+-2. `harness spawn <role> <model> <effort> [--task tN]` → reservation id
+-3. `harness brief <role> [--task tN]` → absolute brief path
+-4. Inspect live `spawn_agent` schema. Launch with:
++Read [lifecycle](references/lifecycle.md) for the reserved mode, supported tool
++schema, observation envelope, and recovery limits. Mode is frozen per reservation;
++changing configuration never releases existing workers.
+ 
+-```text
+-spawn_agent({
+-  agent_type: "<role>",
+-  model: "<model>",
+-  reasoning_effort: "<effort>",
+-  fork_context: false,
+-  message: "Read and follow your brief: <absolute-brief-path>"
+-})
+-```
++1. `models <role> --complexity <LEVEL> [--require-multimodal]`.
++2. `harness spawn <role> <model> <effort> [--task tN]` reserves a launch.
++3. `harness brief <role> [--task tN]` writes the full role and assignment brief.
++4. Inspect the live launch schema and use the mode-specific recipe. Record the
++   real returned ID with `spawn-confirm`; record definitive launch failure with
++   `spawn-fail`. An uncertain result continues holding capacity.
++5. After the worker finishes, record actual native closure or validated terminal
++   observation. Never substitute archive, interruption, or worker text for closure.
+ 
+-Never put backticks or multi-line text in `message`. One retry only after reading
+-the error. Confirm with `harness spawn-confirm <reservation> <agent-id>`.
+-On failure: `harness spawn-fail <reservation> <category> <reason>`.
+-After close: `harness spawn-finish <agent-id> completed|failed --closed`.
+ 
+ Workers use the root `GOAL_GIT`. Worktrees install shared `.git/info/exclude`
+ rules; do not copy `.codex` into worktrees. Refresh with `worktree sync <path>`
+--- a/.agents/skills/goal/references/commands.md
++++ b/.agents/skills/goal/references/commands.md
+@@ -27,14 +27,19 @@
+ models <role> --complexity <LEVEL> [--require-multimodal]
+ harness spawn <role> <model> <effort> [--task tN]
+ harness brief <role> [--task tN]          # prints absolute brief path
+-# spawn_agent({agent_type, model, reasoning_effort, fork_context:false,
+-#              message:"Read and follow your brief: <path>"})
++# Inspect the reserved lifecycle and live tool schema; read lifecycle.md.
++# Observer: collaboration.spawn_agent({task_name:<reserved worker_task_name>,
++#   model, reasoning_effort, fork_turns:"none",
++#   message:"Read and follow your brief: <path>"})
++# Native: use its live spawn schema; actual close support is required.
+ harness spawn-confirm <reservation-id> <agent-id>
+ # on failure:
+ harness spawn-fail <reservation-id> <category> <reason>
+ models <role> --complexity <LEVEL> --next <failed-model> [...]
+-# after closing the child thread:
++# Native only, after actual closure:
+ harness spawn-finish <agent-id> completed|failed --closed
++# Observer only, after recording real completed status:
++harness spawn-finish <agent-id> completed|failed --observation-file <file>
+ ```
+ 
+ If the phase is wrong, spawn auto-advances when legal; otherwise the error names
+@@ -42,12 +47,13 @@
+ 
+ ## Recovery
+ 
+-Every error is JSON with `corrective_action`: run it and retry. "Stop" is only for
+-authentication/permission errors.
++Use structured diagnostics and `corrective_action` where supplied. Save a blocker
++for authentication, permissions, missing dispatch, or unobservable completion; do
++not bypass a lifecycle rejection by reaping or changing configuration.
+ 
+ ```text
+ harness status                      # includes computed next_action
+-harness reap [--older-than <min>]   # release reservations of a dead session (tasks -> PENDING)
++harness reap [--older-than <min>]   # native stale reservations only; observer completion must be observed
+ harness task retry tN [why]         # FAILED/BLOCKED/stuck -> PENDING; re-spawn with --task tN
+ harness task cancel tN [why]        # CANCELLED: VERIFYING and harness done accept it
+ harness budget set <key> <n>        # builder/reviewer caps already grow within max_rework
+@@ -101,3 +107,16 @@
+ 
+ Never complete a failed forge operation via web/browser/`--web`/ad hoc CLI.
+ Auth blockers stop with the suggested local command for the user.
++
++## Worker lifecycle adapter
++
++Read [lifecycle](lifecycle.md) before dispatch. `worker_lifecycle` defaults to
++`native_close`; explicitly opt into `terminal_observation` for the collaboration
++API. Finish observer reservations with `spawn-finish <agent-id> completed|failed
++--observation-file <file>`. Observations are validated and retained in state;
++`closed` stays false. Never age-reap, retry, or cancel an unreleased observer.
++
++`branch_flow` is optional. For GitHub, `{"integration_branch":"development",
++"release_branch":"main"}` selects squash for feature-to-development and merge
++commits for development-to-main. Other heads targeting main are rejected. It does
++not enable automatic merging.
+--- a/.agents/skills/goal/references/delivery-groups.md
++++ b/.agents/skills/goal/references/delivery-groups.md
+@@ -23,6 +23,7 @@
+ No aggregation PR. Evidence is per-group SHA. Context mismatch stops before edits.
+ `worktree add` is not used for groups. One Builder per group checkout.
+ 
+-On continue: restore `GOAL_GROUP` + identities; `harness reap`, then `harness status`
++On continue: restore `GOAL_GROUP` + identities; inspect `harness status`. Reap only
++native stale reservations; observer workers require real terminal evidence
+ (`next_action`); reuse current-SHA evidence.
+ Root `state complete` waits for every required group merged/completed/cancelled.
+--- a/.agents/skills/goal/references/execution.md
++++ b/.agents/skills/goal/references/execution.md
+@@ -1,6 +1,8 @@
+ # Common goal execution
+ 
+ MAIN owns the state machine and every worker launch. Carry explicit selectors.
++
++Read [lifecycle](lifecycle.md) before worker dispatch or recovery.
+ 
+ ## Plan and route
+ 
+@@ -62,7 +64,6 @@
+ 
+ ## Resume
+ 
+-Restore selectors and source. `harness reap` first (releases reservations left by a
+-dead session; their tasks become PENDING), then `harness status` and follow
+-`next_action`. Wait/close live workers before duplicating launches.
++Restore selectors and source. `harness reap` only for native stale reservations (observer reservations require real terminal evidence), then `harness status` and follow
++`next_action`. Wait for workers before duplicating launches; observer workers need real terminal observations and cannot be age-reaped.
+ `harness recover-spawn` only for launch blockers. Reuse branches/PRs/worktrees.
+--- a/.agents/skills/goal/references/issue-queue.md
++++ b/.agents/skills/goal/references/issue-queue.md
+@@ -48,7 +48,8 @@
+ Workers use root `GOAL_GIT` + selectors. Shared excludes keep worktrees clean.
+ Serialize state mutations in MAIN. Require PR metadata from [commands](commands.md).
+ 
+-On continue: `harness reap` per issue, then `issues plan show` — if `status` is `planned`, skip re-planning.
++On continue: inspect each issue's frozen lifecycle; reap native stale reservations only,
++and require real terminal evidence for observer workers. Then `issues plan show` — if `status` is `planned`, skip re-planning.
+ Then `issues queue` + persisted plan; skip completed; reuse worktrees/PRs.
+ If parallel delegation is unavailable, run sequentially in isolated checkouts.
+ If delegation itself is unavailable, save/stop — never implement in MAIN.
+--- /dev/null
++++ b/.agents/skills/goal/references/lifecycle.md
+@@ -0,0 +1,88 @@
++# Worker lifecycle contracts
++
++`worker_lifecycle` defaults to `native_close`. Set `terminal_observation` only
++when the executor has `collaboration.spawn_agent` and `collaboration.list_agents`
++but no close operation. The helper freezes the mode on each reservation; older
++reservations remain native. A configuration edit does not change their evidence.
++
++## Native mode
++
++Use the actual live native spawn schema, await the result, call its real close
++operation, then record `harness spawn-finish <agent> completed|failed --closed`.
++A finished result alone is not closure. Archival and interruption are not closure.
++Do not assert `--closed` if the operation is missing or was not observed.
++
++## Terminal observation mode
++
++After reserve and brief, inspect the returned `worker_task_name`. Launch exactly
++that unique name using the live collaboration schema:
++
++```text
++collaboration.spawn_agent({
++  task_name: <reserved worker_task_name>,
++  model: <reserved model>, reasoning_effort: <reserved effort>,
++  fork_turns: "none",
++  message: "Read and follow your brief: <absolute brief path>"
++})
++```
++
++The brief embeds the role instructions; this API does not automatically load
++named role TOMLs. Pass only fields supported by the actual tool. Confirm the
++real canonical returned name; the helper checks its exact reserved suffix and
++forbids reuse. Wait for completion, then collect a fresh `collaboration.list_agents`
++result. Preserve that real snapshot in the envelope below and record:
++
++```text
++harness spawn-finish <canonical agent name> completed --observation-file <file>
++```
++
++Use outcome `failed` if the completed worker reported a failed task. That releases
++its execution slot but cannot provide successful-role evidence. The supported
++raw terminal status is an object with a nonempty `completed` string. Running,
++unknown, absent, duplicated, or malformed status cannot release the reservation;
++report a blocker if the executor returns another status shape.
++
++```json
++{
++  "source": "collaboration.list_agents",
++  "observed_at": "<actual observation timestamp in ISO 8601 with seconds>",
++  "reservation_id": "<reservation.id>",
++  "goal_key": "<reservation.goal_key>",
++  "run_id": null,
++  "group_id": null,
++  "task_id": null,
++  "rework_cycle": 0,
++  "sha": null,
++  "agent_name": "<actual canonical returned name>",
++  "snapshot": {"agents": [
++    {"agent_name": "<same canonical name>", "agent_status": {"completed": "<real tool result>"}}
++  ]}
++}
++```
++
++The sample nulls are illustrative. Use exact values from the frozen reservation,
++including empty strings or explicit nulls; do not normalize one into the other. Copy the
++actual raw snapshot, not the template or a prior worker's output. MAIN records
++the observation after the tool returns; do not manufacture tool evidence. The
++helper validates matching identities and timestamp bounds atomically, retains
++it in state, and keeps `closed:false`. Repeated identical completion is idempotent;
++changing recorded observation or outcome is rejected. `spawn-finish` atomically
++updates the associated RUNNING task to DONE or FAILED; MAIN records the returned
++handoff and does not need to invent another task-result command.
++
++Once terminally recorded, never steer, resume, or reuse that worker. Every new
++attempt needs a new reservation and unique task name. Its execution slot is
++released, not its addressable conversation thread.
++
++## Recovery
++
++A definitive no-launch `spawn-fail` releases an observer reservation without
++claiming closure. An uncertain launch stays held until confirmed or conclusively
++shown not to have launched. Age, absence, and an aborted call are not proof.
++`reap` refuses active observer reservations. `task retry|cancel` likewise refuses
++an unreleased observer worker; after recording an observed failed outcome, retry
++may create a new reservation. Save a blocker if real terminal evidence is missing.
++
++Successful role/task evidence still requires the current goal/run/group/rework
++identity and, for review/visual gates, the exact implementation commit. Semantic
++failure, an old snapshot, or a configuration change cannot pass those gates.
+--- a/.agents/skills/goal-loop/SKILL.md
++++ b/.agents/skills/goal-loop/SKILL.md
+@@ -9,7 +9,9 @@
+ # Goal Architecture Loop Engineering
+ 
+ Use `$goal` and its relevant references. MAIN directly coordinates workers,
+-waits for results, records them serially, and closes completed threads. Builders
++waits for results and records them serially using each reservation's frozen
++lifecycle. Native mode requires actual closure; terminal observation mode records
++a real completed turn without claiming thread closure. Builders
+ own application edits and staging. MAIN owns workflow state and delivery.
+ 
+ ```text
+@@ -32,14 +34,16 @@
+ 
+ Reserve with `harness spawn`, launch using supported live tool fields, then
+ `spawn-confirm` with the actual child ID; `spawn-fail` releases failed launches.
+-Counters count confirmed launches only. Missing required delegation capability
++Counters count confirmed launches only. Read `$goal`'s lifecycle reference before
++using terminal observation; never resume a terminally recorded worker. Missing required delegation capability
+ is a saved blocker. One targeted launch retry; `recover-spawn` restores the
+ original phase only for launch blockers. Never implement in MAIN.
+ 
+ Run until terminal: keep going until `harness done` exits 0 and delivery is
+ recorded, or a blocker is saved with `harness event blocker`. After each worker
+ returns, record it and take `harness status` `next_action`. Resume with
+-`harness reap` then `harness status`. Rework: `harness retry rework`, `harness
++`harness status`; reap only native stale reservations. Observer workers require
++real terminal observation, even after interruption or restart. Rework: `harness retry rework`, `harness
+ phase REWORK`, `BUILDING`; recover tasks with `task retry|cancel`.
+ 
+ IMPLEMENTATION/ANALYSIS/VERIFICATION are always required. PLAN/REVIEW are
+--- a/.codex/scripts/goal-delegation.sh
++++ b/.codex/scripts/goal-delegation.sh
+@@ -165,9 +165,51 @@
+   if declare -F goal_platform_program >/dev/null; then goal_platform_program
+   else printf '%s\n' 'def goal_platform: "unknown";'; fi
+   printf 'def me: "%s";\n' "${AGENT_PLATFORM:-}"
++  delegation_epoch_jq
+   cat <<'JQ'
++    def lifecycle: .worker_lifecycle // "native_close";
++    def observation_matches($o):
++      . as $r
++      | ($o | type) == "object"
++      and ($o | has("source") and has("observed_at") and has("reservation_id") and
++        has("goal_key") and has("run_id") and has("group_id") and has("task_id") and
++        has("rework_cycle") and has("sha") and has("agent_name") and has("snapshot"))
++      and $o.source == "collaboration.list_agents"
++      and $o.reservation_id == $r.id and $o.goal_key == $r.goal_key
++      and $o.run_id == $r.run_id and $o.group_id == $r.group_id
++      and $o.task_id == $r.task and $o.rework_cycle == $r.rework_cycle
++      and $o.sha == $r.sha and $o.agent_name == $r.agent_id
++      and ($r.confirmed_at | type) == "string"
++      and ($o.observed_at | type) == "string"
++      and ($o.observed_at | epoch) > 0
++      and ($o.observed_at | epoch) >= ($r.confirmed_at | epoch)
++      and ($o.snapshot.agents | type) == "array"
++      and ([$o.snapshot.agents[] | select(.agent_name == $r.agent_id)]
++        | length == 1 and (.[0].agent_status | type) == "object"
++        and (.[0].agent_status | keys) == ["completed"]
++        and (.[0].agent_status.completed | type) == "string"
++        and (.[0].agent_status.completed | length) > 0);
++    def reservation_released:
++      if lifecycle == "native_close" then .closed == true
++      elif lifecycle == "terminal_observation" then
++        (.closed == false) and
++        ((.agent_id == null and .state == "failed" and .failure.category != null
++          and .failure.category != "uncertain" and .failure.at != null)
++         or (.agent_id != null and (.state == "completed" or .state == "failed")
++          and .finished_at != null and observation_matches(.terminal_observation)
++          and (.terminal_observation.observed_at | epoch) <= (.finished_at | epoch)))
++      else false end;
++    def reservation_succeeded:
++      .state == "completed" and reservation_released
++      and (.agent_id | type) == "string" and (.agent_id | length) > 0
++      and .confirmed_at != null and .finished_at != null;
++    def reservation_assignment($g):
++      .goal_key == ($g.id // $g.branch // ($idx | tostring)) and .run_id == ($g.run_id // null)
++      and .group_id == ($g.active_group_id // null);
++    def reservation_current($g):
++      reservation_assignment($g) and .rework_cycle == ($g.harness.counters.rework // 0);
+     def held: .state == "pending" or .state == "uncertain";
+-    def active: held or (.agent_id != null and .closed != true);
++    def active: held or (.agent_id != null and (reservation_released | not));
+     def ledger:
+       [.[] | select(goal_platform == me or goal_platform == "unknown")
+         | (.spawn_reservations // [])[], (.harness.spawn_reservations // [])[],
+@@ -223,7 +265,7 @@
+ }
+ 
+ delegation_reserve() {
+-  local role="${1:-}" model="${2:-}" effort="${3:-}" task="" phase route line allowed cap_value id now sha="" vision=false
++  local role="${1:-}" model="${2:-}" effort="${3:-}" task="" phase route line allowed cap_value id now sha="" vision=false lifecycle
+   [ $# -ge 3 ] && [ -n "$model" ] && [ -n "$effort" ] || {
+     err 'harness spawn requires <role> <model> <effort> [--task tN]'; return 1;
+   }
+@@ -237,6 +279,8 @@
+     task="$2"
+   fi
+   case "$effort" in minimal|low|medium|high|xhigh) ;; *) err "Invalid effort: $effort"; return 1 ;; esac
++  lifecycle="$(config_read worker_lifecycle)"; lifecycle="${lifecycle:-native_close}"
++  case "$lifecycle" in native_close|terminal_observation) ;; *) err "Unknown worker_lifecycle: $lifecycle"; return 1 ;; esac
+   if jq -e --argjson idx "$GOAL_IDX" '.[$idx].kind == "queue"' "$STATE_FILE" >/dev/null 2>&1; then
+     case "$role" in
+       planner|researcher) ;;
+@@ -315,7 +359,7 @@
+   id="spawn-$(python3 -c 'import uuid; print(uuid.uuid4())')"
+   now="$(harness_now)"
+   state_mutate --argjson idx "$GOAL_IDX" --arg role "$role" --arg model "$model" --arg effort "$effort" \
+-    --arg task "$task" --arg phase "$phase" --arg complexity "$route" --arg id "$id" --arg at "$now" --arg sha "$sha" --arg worktree "$launch_worktree" --arg parent_wt "$parent_worktree" --arg repo "${GOAL_REPO:-.}" --argjson concurrency "$cap_value" "$(delegation_jq)"'
++    --arg lifecycle "$lifecycle" --arg task "$task" --arg phase "$phase" --arg complexity "$route" --arg id "$id" --arg at "$now" --arg sha "$sha" --arg worktree "$launch_worktree" --arg parent_wt "$parent_worktree" --arg repo "${GOAL_REPO:-.}" --argjson concurrency "$cap_value" "$(delegation_jq)"'
+     .[$idx] as $g | $g.harness as $h | ledger as $all
+     | if $h.phase != $phase or ($h.complexity // "NORMAL") != $complexity then error("Harness changed; resolve routing and retry") else . end
+     | ({planner:"PLANNED", researcher:"RESEARCHING", builder:"BUILDING", "builder-expert":"BUILDING",
+@@ -324,7 +368,7 @@
+         error("Spawn rejected: role " + $role + " during " + $phase + "; expected " + $expected + ". Run: harness phase " + $expected + " (from VERIFYING/REVIEWING use harness retry rework, harness phase REWORK, then BUILDING)")
+       else . end
+     | if any($all[]; .state == "uncertain") then error("Uncertain launch outcome; run harness spawn-confirm <reservation> <agent-id> if the agent started, harness spawn-fail <reservation> <category> <reason> if it did not, or harness reap for leftovers of a previous session") else . end
+-    | if ([$all[] | select(active)] | length) >= $concurrency then error("Concurrency limit reached across issues/groups of this platform; finish and close an agent (spawn-finish <agent> completed|failed --closed), or run harness reap for stale reservations of a previous session") else . end
++    | if ([$all[] | select(active)] | length) >= $concurrency then error("Concurrency limit reached across issues/groups of this platform; finish the worker using its reserved lifecycle (native --closed or observer --observation-file); only native stale reservations may be reaped") else . end
+     | [($g.spawn_reservations // [])[] | select(.group_id == ($g.active_group_id // null) and held)] as $pending
+     | if $task != "" then
+         ($h.tasks // [] | map(select(.id == $task)) | .[0]) as $t
+@@ -368,6 +412,8 @@
+     | .[$idx].spawn_reservations = (($g.spawn_reservations // []) + [{
+         id:$id, role:$role, model:$model, effort:$effort, task:(if $task == "" then null else $task end),
+         phase:$phase, prior_phase:$phase, state:"pending", created_at:$at, closed:false,
++        worker_lifecycle:$lifecycle,
++        worker_task_name:(if $lifecycle == "terminal_observation" then ("worker_" + ($id | gsub("-"; "_"))) else null end),
+         sha:(if $sha == "" then null else $sha end),
+         group_id:($g.active_group_id // null), goal_key:($g.id // $g.branch // ($idx | tostring)),
+         run_id:($g.run_id // null), rework_cycle:($h.counters.rework // 0), repo:$repo, worktree:$worktree }])
+@@ -391,6 +437,9 @@
+     (.[$idx].spawn_reservations // [] | map(select(.id == $id)) | .[0]) as $r
+     | if $r == null then error("Unknown reservation: " + $id) else . end
+     | owner($idx; $r)
++    | if ($r | lifecycle) == "terminal_observation" and
++        (($agent | endswith("/" + $r.worker_task_name)) | not)
++      then error("Observed worker agent name must end with reserved worker_task_name") else . end
+     | if $r.agent_id != null then
+         if $r.agent_id == $agent then . else error("Reservation already confirmed with another agent ID") end
+       elif ($r | held | not) then error("Cannot confirm a released reservation")
+@@ -439,7 +488,7 @@
+         .[$idx].spawn_reservations |= map(if .id == $id then
+           .state = (if $category == "uncertain" then "uncertain" else "failed" end)
+           | .failure = {category:$category, reason:$reason, at:$at}
+-          | .closed = ($category != "uncertain") else . end)
++          | .closed = (if lifecycle == "terminal_observation" then false else ($category != "uncertain") end) else . end)
+         | if $r.task != null then .[$idx].harness.tasks |= map(if .id == $r.task and .spawn_reservation_id == $id then
+             if .state != "SPAWNING" and (.state != "BLOCKED" or .blocker_kind != "spawn") then
+               error("Task has a real failure/state change; reconcile explicitly") else
+@@ -458,28 +507,43 @@
+ cmd_harness_spawn_finish() { delegation_shared delegation_finish "$@"; }
+ 
+ delegation_finish() {
+-  local agent="${1:-}" status="${2:-}" closed=false now id
+-  [ $# -ge 2 ] && [ -n "$agent" ] || { err 'spawn-finish requires <agent-id> completed|failed [--closed]'; return 1; }
++  local agent="${1:-}" status="${2:-}" closed=false observation=null now id
++  [ $# -ge 2 ] && [ -n "$agent" ] || { err 'spawn-finish requires <agent-id> completed|failed [--closed | --observation-file FILE]'; return 1; }
+   case "$status" in completed|failed) ;; *) err 'spawn-finish status must be completed or failed'; return 1 ;; esac
+   shift 2
+   if [ $# -gt 0 ]; then
+-    [ $# -eq 1 ] && [ "$1" = --closed ] || { err 'Expected --closed'; return 1; }; closed=true
++    if [ $# -eq 1 ] && [ "$1" = --closed ]; then closed=true
++    elif [ $# -eq 2 ] && [ "$1" = --observation-file ]; then
++      observation=$(jq -ce . "$2") || { err 'Invalid observation JSON'; return 1; }
++    else err 'Expected --closed or --observation-file FILE'; return 1; fi
+   fi
+   now="$(harness_now)"
+-  state_mutate --argjson idx "$GOAL_IDX" --arg agent "$agent" --arg status "$status" --arg at "$now" --argjson closed "$closed" "$(delegation_jq)"'
++  state_mutate --argjson idx "$GOAL_IDX" --arg agent "$agent" --arg status "$status" --arg at "$now" \
++    --argjson closed "$closed" --argjson observation "$observation" "$(delegation_jq)"'
+     (.[$idx].spawn_reservations // [] | map(select(.agent_id == $agent)) | .[0]) as $r
+     | if $r == null then error("Unknown confirmed agent ID: " + $agent) else . end
+     | owner($idx; $r)
+     | if $r.state != "confirmed" and $r.state != $status then error("Agent already finished with a different status") else . end
++    | if ($r | lifecycle) == "terminal_observation" then
++        if $closed then error("Observer lifecycle cannot assert thread closure")
++        elif ($r | observation_matches($observation) | not) or ($observation.observed_at | epoch) > ($at | epoch)
++          then error("Observation does not match the confirmed reservation or terminal completed status")
++        elif $r.terminal_observation != null and $r.terminal_observation != $observation
++          then error("A terminal observation is immutable") else . end
++      elif ($r | lifecycle) == "native_close" then
++        if $observation != null then error("Native lifecycle requires actual closure; observation is not closure") else . end
++      else error("Unknown reservation lifecycle") end
+     | .[$idx].spawn_reservations |= map(if .id == $r.id then
+-        .state = $status | .finished_at = (.finished_at // $at) | .closed = (.closed == true or $closed) else . end)
++        .state = $status | .finished_at = (.finished_at // $at)
++        | if lifecycle == "terminal_observation" then .closed = false | .terminal_observation = $observation
++          else .closed = (.closed == true or $closed) end else . end)
+     | if $r.task != null and $r.state == "confirmed" then .[$idx].harness.tasks |= map(
+         if .id == $r.task and .agent_id == $agent and .state == "RUNNING" then
+           .state = (if $status == "completed" then "DONE" else "FAILED" end)
+           | if $status == "failed" then .blocker_kind = "agent" else . end
+         else . end) else . end
+     | if $r.state == "confirmed" or ($closed and $r.closed != true) then
+-        event($idx; $at; "spawn_finished"; $agent + " " + $status + " closed=" + ($closed | tostring)) else . end
++        event($idx; $at; "spawn_finished"; $agent + " " + $status + " lifecycle=" + ($r | lifecycle) + " closed=" + ($closed | tostring)) else . end
+     | commit($idx)
+   ' || return 1
+   id="$(jq -r --argjson idx "$GOAL_IDX" --arg agent "$agent" '.[$idx].spawn_reservations[] | select(.agent_id == $agent) | .id' "$STATE_FILE")"
+@@ -498,13 +562,12 @@
+   case "$role" in reviewer|visual-reviewer)
+     if declare -F implementation_fingerprint >/dev/null; then sha="$(implementation_fingerprint)" || return 1; fi ;;
+   esac
+-  jq -e --argjson idx "$GOAL_IDX" --arg role "$role" --arg sha "$sha" '
++  jq -e --argjson idx "$GOAL_IDX" --arg role "$role" --arg sha "$sha" "$(delegation_jq)"'
+     .[$idx] as $g
+     | [($g.spawn_reservations // [])[] | select(
+         .group_id == ($g.active_group_id // null) and .role == $role and
+         .run_id == ($g.run_id // null) and .rework_cycle == ($g.harness.counters.rework // 0))] | last
+-    | .state == "completed" and .closed == true and ($sha == "" or .sha == $sha) and (.agent_id | type) == "string" and
+-        (.agent_id | length) > 0 and .confirmed_at != null and .finished_at != null
++    | reservation_succeeded and reservation_current($g) and ($sha == "" or .sha == $sha)
+   ' "$STATE_FILE" >/dev/null
+ }
+ 
+@@ -572,13 +635,13 @@
+   [ -n "$ids" ] || return 0
+   count="$(printf '%s' "$ids" | wc -w | tr -d ' ')"
+   warn "$count spawn reservation(s) are still held: $ids"
+-  warn "If no worker is running (new session), release them with: goal-git.sh harness reap"
++  warn "For native stale reservations use harness reap; observer workers require a real terminal observation"
+ }
+ 
+ cmd_harness_reap() { delegation_shared delegation_reap "$@"; }
+ 
+ delegation_reap() {
+-  local older=0 now cutoff reaped
++  local older=0 now cutoff reaped blocked
+   while [ $# -gt 0 ]; do
+     case "$1" in
+       --older-than)
+@@ -587,6 +650,13 @@
+       *) err "Unknown harness reap argument: $1"; return 1 ;;
+     esac
+   done
++  blocked=$(jq -r --argjson idx "$GOAL_IDX" "$(delegation_jq)"'
++    [(.[$idx].spawn_reservations // [])[] | select(lifecycle == "terminal_observation" and active) | .id] | join(", ")
++  ' "$STATE_FILE") || return 1
++  if [ -n "$blocked" ]; then
++    err "Observer reservations cannot be reaped by age: $blocked; record real terminal observation or definitive no-launch failure"
++    return 1
++  fi
+   now="$(harness_now)"
+   cutoff=$(( $(date +%s) - older * 60 ))
+   reaped="$(jq -c --argjson idx "$GOAL_IDX" --argjson cutoff "$cutoff" "$(delegation_jq)$(delegation_epoch_jq)$(delegation_stale_jq)"'
+@@ -604,11 +674,13 @@
+            and (($ids | index($t.spawn_reservation_id)) != null)
+         then .state = "PENDING" | del(.agent_id, .spawn_reservation_id, .blocker_kind, .blocked_kind, .blocker_reason, .spawn_failure)
+         else . end);
+-    def release: map(. as $r | if (($ids | index($r.id)) != null) and ($r | stale($cutoff)) then
++    def release: map(. as $r | if (($ids | index($r.id)) != null) and ($r | lifecycle) == "native_close" and ($r | stale($cutoff)) then
+         .state = "failed" | .closed = true | .finished_at = (.finished_at // $at)
+         | .failure = {category:"reaped", reason:"stale reservation from a previous session", at:$at}
+       else . end);
+-    .[$idx].spawn_reservations |= release
++    if any((.[$idx].spawn_reservations // [])[]; lifecycle == "terminal_observation" and active)
++      then error("Observer worker appeared during reap; terminal observation is required, no reservations were released") else . end
++    | .[$idx].spawn_reservations |= release
+     | .[$idx].harness.spawn_reservations |= (. // [] | release)
+     | if .[$idx].delivery_groups then .[$idx].delivery_groups |= map(if .harness then .harness.spawn_reservations |= (. // [] | release) else . end) else . end
+     | .[$idx].harness.tasks |= (. // [] | release_tasks)
+@@ -641,6 +713,9 @@
+     (.[$idx].harness.tasks // [] | map(select(.id == $id)) | .[0]) as $t
+     | (.[$idx].active_group_id // null) as $gid
+     | if $t == null then error("Unknown task: " + $id) else . end
++    | if any((.[$idx].spawn_reservations // [])[];
++        .task == $id and .group_id == $gid and lifecycle == "terminal_observation" and active)
++      then error("Task has an unreleased observer worker; observe terminal completion before retry/cancel") else . end
+     | if $t.state == "DONE" then error("Task " + $id + " is already DONE; for new work run harness retry rework, harness phase REWORK, harness phase BUILDING and add a task") else . end
+     | if $mode == "cancel" and $t.state == "CANCELLED" then error("Task " + $id + " is already CANCELLED") else . end
+     | .[$idx].spawn_reservations |= map(
+--- a/.codex/scripts/goal-evidence.sh
++++ b/.codex/scripts/goal-evidence.sh
+@@ -16,12 +16,14 @@
+ harness_completed_role() {
+   local role="$1" sha
+   sha=$(implementation_fingerprint) || return
+-  jq -e --argjson idx "$GOAL_IDX" --arg repo "${GOAL_REPO:-.}" --arg role "$role" --arg sha "$sha" '
+-    any((.[$idx].harness.spawn_reservations // [])[];
+-      .role == $role and .agent_id != null and .state == "completed" and .closed == true and .sha == $sha and (.repo // ".") == $repo)
++  jq -e --argjson idx "$GOAL_IDX" --arg repo "${GOAL_REPO:-.}" --arg role "$role" --arg sha "$sha" "$(delegation_jq)"'
++    .[$idx] as $g
++    | [($g.harness.spawn_reservations // [])[] |
++        select(.role == $role and (.repo // ".") == $repo and reservation_current($g))] | last
++    | reservation_succeeded and .sha == $sha
+   ' "$STATE_FILE" >/dev/null || {
+-    goal_error missing_agent "Evidence requires a confirmed, completed, closed $role agent for this commit" \
+-      "Launch the $role (harness spawn $role <model> <effort>, brief, launch, spawn-confirm) and close it with spawn-finish <agent-id> completed --closed; use harness reap if its reservation is from a dead session"; return 1;
++    goal_error missing_agent "Evidence requires a confirmed, successful, lifecycle-released $role agent for this commit" \
++      "Launch the $role (harness spawn $role <model> <effort>, brief, launch, spawn-confirm) and finish it using its frozen lifecycle (--closed or --observation-file); never age-reap observer workers"; return 1;
+   }
+ }
+ 
+--- a/.codex/scripts/goal-git.sh
++++ b/.codex/scripts/goal-git.sh
+@@ -89,7 +89,7 @@
+                             Reserve a launch; returns reservation JSON
+   harness spawn-confirm <reservation> <agent-id>
+   harness spawn-fail <reservation> <category> <reason>
+-  harness spawn-finish <agent-id> completed|failed [--closed]
++  harness spawn-finish <agent-id> completed|failed [--closed | --observation-file FILE]
+   harness budget set <key> <n>
+                             Raise a live spawn cap (e.g. max_reviewer_runs) without re-init
+   harness metrics           Print spawn/run metrics
+@@ -1335,8 +1335,27 @@
+   merge_pr_in_dir "$(goal_workdir)" "$pr_number" "$pr_url"
+ }
+ 
++# Explicit branch flow is opt-in. Legacy configurations keep merge commits.
++merge_flag_for() {
++  local branch="$1" base="$2" flow integration release
++  flow="$(config_read branch_flow)"
++  if [ -z "$flow" ] || [ "$flow" = null ]; then printf '%s\n' --merge; return; fi
++  [ "$platform" = github ] || { goal_error branch_flow "Configured branch_flow is supported only for GitHub"; return 1; }
++  integration=$(printf '%s' "$flow" | jq -er '.integration_branch | select(type == "string" and length > 0)') || return
++  release=$(printf '%s' "$flow" | jq -er '.release_branch | select(type == "string" and length > 0)') || return
++  [ "$integration" != "$release" ] || { goal_error branch_flow "Integration and release branches must differ"; return 1; }
++  if [ "$base" = "$integration" ] && [ "$branch" != "$integration" ] && [ "$branch" != "$release" ]; then
++    printf '%s\n' --squash
++  elif [ "$base" = "$release" ] && [ "$branch" = "$integration" ]; then
++    printf '%s\n' --merge
++  else
++    goal_error branch_flow "Branch flow rejects $branch -> $base; feature branches target $integration and only $integration targets $release"
++    return 1
++  fi
++}
++
+ merge_pr_in_dir() {
+-  local wd="$1" pn="$2" url="$3" sha branch base repo meta key mode
++  local wd="$1" pn="$2" url="$3" sha branch base repo meta key mode merge_flag
+   key="${wd#"$PROJECT_ROOT"/}"; [ "$wd" != "$PROJECT_ROOT" ] || key=.
+   case "$key" in .worktrees/*) key=. ;; esac
+   delivery_clean "$wd" || return
+@@ -1344,6 +1363,7 @@
+   sha=$(git -C "$wd" rev-parse HEAD)
+   branch=$(git -C "$wd" branch --show-current)
+   base=$(jq -r --argjson idx "$GOAL_IDX" '.[$idx].base_branch' "$STATE_FILE")
++  merge_flag=$(merge_flag_for "$branch" "$base") || return
+   repo=$(delivery_repo "$wd") || return
+   meta=$(delivery_remote_request "$wd" "$pn") || return
+   if ! delivery_merged_request_ok "$meta" "$pn" "$branch" "$base" "$sha"; then
+@@ -1354,8 +1374,8 @@
+   printf '%s' "$meta" | jq -e --argjson n "$pn" '.number == $n' >/dev/null || { goal_error stale_delivery "Recorded PR/MR identity differs from the current open request"; return 1; }
+   delivery_validate_metadata "$meta" "$branch" "$base" "$sha" || return
+   if [ "$platform" = github ]; then
+-    forge_require_flags gh 'pr merge' --repo --merge --match-head-commit || return
+-    forge_run write gh pr merge "$pn" --repo "$repo" --merge --match-head-commit "$sha" >&2 || return
++    forge_require_flags gh 'pr merge' --repo "$merge_flag" --match-head-commit || return
++    forge_run write gh pr merge "$pn" --repo "$repo" "$merge_flag" --match-head-commit "$sha" >&2 || return
+   else
+     forge_require_flags glab 'mr merge' --repo --sha --yes --auto-merge || return
+     forge_run write glab mr merge "$pn" --repo "$repo" --sha "$sha" --yes --auto-merge=false >&2 || return
+@@ -2878,25 +2898,20 @@
+     exit 1
+   fi
+ 
+-  if [ "$state" = RUNNING ] || [ "$state" = DONE ]; then
+-    jq -e --argjson idx "$GOAL_IDX" --arg id "$id" --arg state "$state" '
+-      any((.[$idx].harness.spawn_reservations // [])[];
+-        .task == $id and .agent_id != null and
+-        (if $state == "DONE" then .state == "completed" else .state == "confirmed" end))
+-    ' "$STATE_FILE" >/dev/null || {
+-      goal_error missing_agent "Task $id has no confirmed agent for state $state" \
+-        "Reserve and launch it: harness spawn <role> <model> <effort> --task $id, then spawn-confirm <reservation> <agent-id>; after it returns run spawn-finish <agent-id> completed --closed before harness task set $id DONE"
+-      return 1
+-    }
+-  fi
+-  state_mutate --argjson idx "$GOAL_IDX" --arg id "$id" --arg state "$state" '
+-    .[$idx].harness.tasks |= map(
++  state_mutate --argjson idx "$GOAL_IDX" --arg id "$id" --arg state "$state" "$(delegation_jq)"'
++    .[$idx] as $g | ($g.harness.tasks | map(select(.id == $id)) | first) as $t
++    | if ($state == "DONE" or $state == "RUNNING") and
++        (any(($g.harness.spawn_reservations // [])[];
++          .task == $id and .agent_id != null and .id == $t.spawn_reservation_id
++          and .agent_id == $t.agent_id and reservation_assignment($g) and
++          (if $state == "DONE" then reservation_succeeded else .state == "confirmed" and reservation_current($g) end)) | not)
++      then error("Task has no current confirmed successful/released worker for requested state") else . end
++    | .[$idx].harness.tasks |= map(
+       if .id == $id then
+         .state = $state
+         | if $state == "RUNNING" then .attempts += 1 else . end
+-      else . end
+-    )
+-  '
++      else . end)
++  ' || return 1
+ 
+   harness_event "harness" "task_set" "$id=$state"
+   groups_persist_active 2>/dev/null || true
+@@ -2916,12 +2931,19 @@
+     | "\(.count)\t\(.not_done)"
+   ' "$STATE_FILE")"
+   local count not_done
+-  jq -e --argjson idx "$GOAL_IDX" '
+-    .[$idx].harness as $h | all($h.tasks[] | select((.role == "builder" or .role == "builder-expert") and .state != "CANCELLED");
+-      . as $t | any(($h.spawn_reservations // [])[]; .task == $t.id and .agent_id == $t.agent_id and .state == "completed"))
++  jq -e --argjson idx "$GOAL_IDX" "$(delegation_jq)"'
++    .[$idx] as $g | $g.harness as $h
++    | all($h.tasks[] | select((.role == "builder" or .role == "builder-expert") and .state != "CANCELLED");
++      . as $t | any(($h.spawn_reservations // [])[];
++        .task == $t.id and .id == $t.spawn_reservation_id and .agent_id == $t.agent_id
++        and reservation_assignment($g) and reservation_succeeded))
++    and any($h.tasks[] | select((.role == "builder" or .role == "builder-expert") and .state != "CANCELLED");
++      . as $t | any(($h.spawn_reservations // [])[];
++        .task == $t.id and .id == $t.spawn_reservation_id and .agent_id == $t.agent_id
++        and reservation_current($g) and reservation_succeeded))
+   ' "$STATE_FILE" >/dev/null || {
+-    goal_error missing_agent "Builder tasks require confirmed completed agents" \
+-      "For each builder task run spawn-confirm after launching and spawn-finish <agent-id> completed --closed when it returns; for a task whose agent was lost use harness task retry tN or harness task cancel tN"
++    goal_error missing_agent "Builder tasks require exact successful/released agents, including a Builder in the current rework cycle" \
++      "For each builder task run spawn-confirm after launching and spawn-finish <agent-id> completed with its reserved --closed or --observation-file mode when it returns; for a task whose agent was lost use harness task retry tN or harness task cancel tN"
+     return 1
+   }
+   count="$(echo "$info" | cut -f1)"
+@@ -3237,7 +3259,7 @@
+           if ($pending | length) > 0 then
+             "Launch " + (if $h.phase == "ESCALATED" then "builder-expert" else ($pending[0].role // "builder") end) + " for task " + $pending[0].id + ": harness brief <role> --task " + $pending[0].id + "; harness spawn <role> <model> <effort> --task " + $pending[0].id + "; launch; spawn-confirm."
+           elif ($running | length) > 0 then
+-            "Wait for running worker(s) " + ($running | map(.id) | join(", ")) + "; when each returns: spawn-finish <agent-id> completed --closed, then harness task set <id> DONE (or harness task retry <id> / reap if the agent is gone)."
++            "Wait for running worker(s) " + ($running | map(.id) | join(", ")) + "; when each returns: spawn-finish <agent-id> completed with its reserved --closed or --observation-file mode, then harness task set <id> DONE (retry only after release; observer workers cannot be age-reaped)."
+           elif ($broken | length) > 0 then
+             "Task " + ($broken[0].id) + " is " + $broken[0].state + ": harness task retry " + $broken[0].id + ", harness task cancel " + $broken[0].id + ", or escalate (harness phase ESCALATED + builder-expert)."
+           elif ($tasks | length) == 0 then "Register implementation tasks: harness task add builder <title>."
+@@ -3562,12 +3584,13 @@
+   harness_require
+ 
+   harness_require_current_evidence || return
+-  jq -e --argjson idx "$GOAL_IDX" '.[$idx] |
++  jq -e --argjson idx "$GOAL_IDX" "$(delegation_jq)"'.[$idx] |
+     .harness.phase != "FAILED" and
+     all(.harness.tasks[]?; .state == "DONE" or .state == "CANCELLED") and
+-    all((.harness.spawn_reservations // [])[]; .state == "failed" or (.state == "completed" and .closed == true))' "$STATE_FILE" >/dev/null || {
++    all((.harness.spawn_reservations // [])[];
++      (.state == "failed" or .state == "completed") and reservation_released)' "$STATE_FILE" >/dev/null || {
+     goal_error incomplete "Harness is failed, tasks remain, or agents/reservations are still active" \
+-      "Run harness status (next_action). FAILED: harness phase REWORK after fixing the cause. Open tasks: harness task retry|cancel tN. Live agents: spawn-finish <agent-id> completed --closed, or harness reap after a restart"; return 1;
++      "Run harness status (next_action). FAILED: harness phase REWORK after fixing the cause. Open tasks: harness task retry|cancel tN. Live agents: spawn-finish with the reserved lifecycle; age-based reap is native-only"; return 1;
+   }
+   local required
+   required="$(jq -c --argjson idx "$GOAL_IDX" '
+@@ -3779,7 +3802,17 @@
+     else
+       printf -- '- branch: `%s` (base: `%s`)\n\n' "$branch" "$base"
+     fi
+-    printf '## Rules\n\n'
++    if [ "$AGENT_PLATFORM" = codex ]; then
++      printf '## Role instructions\n\n'
++      python3 - "$PROJECT_ROOT/$AGENT_CONFIG_DIR/agents/$role.toml" <<'ROLE'
++import sys
++import tomllib
++with open(sys.argv[1], "rb") as role_file:
++    print(tomllib.load(role_file)["developer_instructions"])
++ROLE
++      printf '\n'
++    fi
++    printf '## Rules\n\n' 
+     printf -- '- Use only the root GOAL_GIT above. Do not invent helper paths from the worktree.\n'
+     printf -- '- Carry every selector on every shell invocation.\n'
+     if [ "$is_queue" = true ]; then
+@@ -3830,7 +3863,10 @@
+     elif [ "$AGENT_PLATFORM" = "cursor" ]; then
+       printf 'Launch with the Agent/Task tool: subagent `%s`, prompt `Read and follow your brief: %s`\n' "$role" "$out"
+     else
+-      printf 'spawn_agent({agent_type, model, reasoning_effort, fork_context:false, message:"Read and follow your brief: %s"})\n' "$out"
++      printf 'Inspect the confirmed reservation mode before launching.\n'
++      printf 'terminal_observation: collaboration.spawn_agent({task_name:<reserved worker_task_name>, model:<reserved model>, reasoning_effort:<reserved effort>, fork_turns:"none", message:"Read and follow your brief: %s"})\n' "$out"
++      printf 'native_close: use the live native spawn schema and its actual close tool.\n'
++      printf 'Never resume or steer a terminally observed worker; every attempt needs a new reservation/name.\n' 
+     fi
+     printf '\n## Notes from MAIN\n\n'
+     printf '(MAIN may append rework findings below this line.)\n'

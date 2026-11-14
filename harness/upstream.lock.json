@@ -1,0 +1,99 @@
+{
+  "repository": "https://github.com/vinutama/ai-prerequisites",
+  "commit": "c2d30fff4a12c5d646536c3f511f6e18e2482f73",
+  "archive_url": "https://api.github.com/repos/vinutama/ai-prerequisites/tarball/c2d30fff4a12c5d646536c3f511f6e18e2482f73",
+  "archive_sha256": "66c3b274e2b8f170ae111485983e187dfa0afc83c5cf5526b29222c152e9bb4d",
+  "template": "templates/codex",
+  "model": "gpt-6.1-sol",
+  "hooks_enabled": true,
+  "max_total_threads": 4,
+  "patches": [
+    {
+      "path": "harness/patches/lifecycle-adapter.patch",
+      "sha256": "84955d141b63ead2bd26d94b9b2fa1fd251fb2803c8577b4ca002dd413eacf08",
+      "inputs": {
+        ".agents/skills/goal/SKILL.md": "0794d12832b6f361f30d73ae1c1d47540d71afda5e90dd068b9b41ce345695e6",
+        ".agents/skills/goal/references/commands.md": "9cef27491c655e1e6d182155acd9457391bd6dffb08dbc24dc66e611cfd6ab8f",
+        ".agents/skills/goal/references/delivery-groups.md": "ec7bec70fc85718a0887c7399ed9d86822d35167d22215e74a17b51c94106415",
+        ".agents/skills/goal/references/execution.md": "612c8fcf9bb0498788b0e3a0945df53d34e2cc25ca0e6a8ac9839c20ccbc1ed2",
+        ".agents/skills/goal/references/issue-queue.md": "c37ed1fb71d6fa4e7850fc89c8ed5cd17ad274afd7a919af7eeb894f7a5c35d0",
+        ".agents/skills/goal-loop/SKILL.md": "a12f6b4751933300b5752eaabdfab339f07906e23f6dd7d5d4bd296c7db4de36",
+        ".codex/scripts/goal-delegation.sh": "550e754f27540fa46e10c1da0aa20382786ae362ae2fde91ad5519300cb0858a",
+        ".codex/scripts/goal-evidence.sh": "7edaebe216f6708a0ef8ed2822ce608d57eba4b786bf4e2f41b84083e6a6cff3",
+        ".codex/scripts/goal-git.sh": "26283cfc28284533289213fbcce9557c934237f380e9022275e7e23147258dc1"
+      },
+      "outputs": {
+        ".agents/skills/goal/SKILL.md": "a08cae91337d44339d5f6ec8241e73aac4fa38bb8a2860b920cb61980b9bd4b1",
+        ".agents/skills/goal/references/commands.md": "c385091a8a5c0744d109a7f2cd2e05262e629f5e851bd8251996f570a1ec3c0d",
+        ".agents/skills/goal/references/delivery-groups.md": "81b465731f0abcce997624bad76e1210d781d772dd3aa7fbc3f22d3697f8cecf",
+        ".agents/skills/goal/references/execution.md": "abcc6ca08f18089abf6facbcc096d94a4891aefe490330e629645274250fbe15",
+        ".agents/skills/goal/references/issue-queue.md": "c278c10316aa07b5e876b24b1eb3e209cf038c7fa6e2a957feeca5f6d481b1b8",
+        ".agents/skills/goal/references/lifecycle.md": "828203104c8520efeb2429d8cd3bd700cd1a83f3348c5a94173c2390d687d25b",
+        ".agents/skills/goal-loop/SKILL.md": "bcd8c09aa6d66d3d1ab2ce3647cb19aff0a51341129bbb54232786b5fe798ec0",
+        ".codex/scripts/goal-delegation.sh": "f68908709403cd1e62db9e9a7cbb671af34b3aef3326ec5bd49c0ddee9154ac3",
+        ".codex/scripts/goal-evidence.sh": "421dd83c7ce3783c25571378d73efe45f8b239b4b77c377e6b6552b270583647",
+        ".codex/scripts/goal-git.sh": "e5a86eb1821ff95e2636e44c8c2eb84d05dde9486c967bb6cfe505b879c1fc40"
+      }
+    }
+  ],
+  "orchestrator": {
+    "model": "gpt-6.1-sol",
+    "model_reasoning_effort": "high"
+  },
+  "role_overrides": {
+    "builder": {
+      "TRIVIAL": {
+        "model": "gpt-6-luna",
+        "model_reasoning_effort": "xhigh"
+      },
+      "NORMAL": {
+        "model": "gpt-6-luna",
+        "model_reasoning_effort": "xhigh"
+      },
+      "COMPLEX": {
+        "model": "gpt-6-luna",
+        "model_reasoning_effort": "xhigh"
+      },
+      "ARCHITECTURAL": {
+        "model": "gpt-6-luna",
+        "model_reasoning_effort": "xhigh"
+      }
+    },
+    "researcher": {
+      "TRIVIAL": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      },
+      "NORMAL": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      },
+      "COMPLEX": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      },
+      "ARCHITECTURAL": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      }
+    },
+    "visual-reviewer": {
+      "TRIVIAL": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      },
+      "NORMAL": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      },
+      "COMPLEX": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      },
+      "ARCHITECTURAL": {
+        "model": "gpt-6.1-sol",
+        "model_reasoning_effort": "low"
+      }
+    }
+  }
+}

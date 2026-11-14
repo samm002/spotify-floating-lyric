@@ -1,0 +1,7 @@
+[
+  {"name": "fmt", "cmd": "cargo fmt --all -- --check"},
+  {"name": "build", "cmd": "cargo build --locked"},
+  {"name": "clippy", "cmd": "cargo clippy --locked --all-targets -- -D warnings"},
+  {"name": "test", "cmd": "cargo test --locked"},
+  {"name": "harness", "cmd": "python3 scripts/test-harness.py"}
+]
