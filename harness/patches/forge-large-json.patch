@@ -1,0 +1,27 @@
+--- a/.codex/scripts/forge.sh
++++ b/.codex/scripts/forge.sh
+@@ -314,7 +314,7 @@
+   while :; do
+     data=$(forge_run read "$cli" api "$endpoint${separator}per_page=100&page=$page" --hostname "$host" --method GET) || return 1
+     data=$(printf '%s\n' "$data" | forge_json 'type == "array"') || return 1
+-    all=$(jq -cn --argjson all "$all" --argjson data "$data" '$all+$data') || return 1
++    all=$(printf '%s\n%s\n' "$all" "$data" | jq -cs '.[0]+.[1]') || return 1
+     [ "$(jq length <<< "$data")" -eq 100 ] || break
+     page=$((page + 1))
+     [ "$page" -le 10000 ] || { forge_error pagination 'Pagination did not terminate'; return 1; }
+@@ -358,13 +358,13 @@
+     data=$(forge_run read gh pr view "$number" "${FORGE_REPO_ARGS[@]}" --json number,url,headRefName,baseRefName,headRefOid,state,isCrossRepository) || return 1
+     data=$(printf '%s\n' "$data" | forge_json 'type=="object" and .isCrossRepository==false') || return 1
+     files=$(forge_api_pages gh "$FORGE_API_PATH/pulls/$number/files" "$FORGE_API_HOST") || return 1
+-    data=$(jq -c --argjson files "$files" '{number,url,head:.headRefName,base:.baseRefName,sha:.headRefOid,state:(.state|ascii_downcase),files:[$files[].filename]}' <<< "$data") || return 1
++    data=$(printf '%s\n%s\n' "$data" "$files" | jq -cs '.[0] as $request | .[1] as $files | $request | {number,url,head:.headRefName,base:.baseRefName,sha:.headRefOid,state:(.state|ascii_downcase),files:[$files[].filename]}') || return 1
+   else
+     forge_require_flags glab 'mr view' --output --repo || return 1
+     data=$(forge_run read glab mr view "$number" "${FORGE_REPO_ARGS[@]}" --output json) || return 1
+     data=$(printf '%s\n' "$data" | forge_json 'type=="object" and (.source_project_id|type)=="number" and .source_project_id==.target_project_id') || return 1
+     files=$(forge_api_pages glab "$FORGE_API_PATH/merge_requests/$number/diffs" "$FORGE_API_HOST") || return 1
+-    data=$(jq -c --argjson files "$files" '{number:.iid,url:.web_url,head:.source_branch,base:.target_branch,sha:(.sha // .diff_refs.head_sha),state:(if .state=="opened" then "open" else .state end),files:[$files[]|.new_path]}' <<< "$data") || return 1
++    data=$(printf '%s\n%s\n' "$data" "$files" | jq -cs '.[0] as $request | .[1] as $files | $request | {number:.iid,url:.web_url,head:.source_branch,base:.target_branch,sha:(.sha // .diff_refs.head_sha),state:(if .state=="opened" then "open" else .state end),files:[$files[]|.new_path]}') || return 1
+   fi
+   data=$(printf '%s\n' "$data" | forge_json 'type=="object" and (.number|type)=="number" and .number>0 and (.url|type)=="string" and (.url|test("^https?://")) and (.head|type)=="string" and (.base|type)=="string" and (.sha|type)=="string" and (.sha|length)>0 and .state=="open" and (.files|type)=="array" and all(.files[]; type=="string")') || return 1
+   if ! jq -e --arg h "$branch" --arg b "$base" --argjson n "$number" '.head==$h and .base==$b and .number==$n' <<< "$data" >/dev/null; then

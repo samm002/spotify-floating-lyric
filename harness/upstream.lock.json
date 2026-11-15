@@ -34,6 +34,16 @@
         ".codex/scripts/goal-evidence.sh": "421dd83c7ce3783c25571378d73efe45f8b239b4b77c377e6b6552b270583647",
         ".codex/scripts/goal-git.sh": "e5a86eb1821ff95e2636e44c8c2eb84d05dde9486c967bb6cfe505b879c1fc40"
       }
+    },
+    {
+      "path": "harness/patches/forge-large-json.patch",
+      "sha256": "ff8f32578cba6fe803b583c99ea3fcefb4a4531534a78763406911cab57f2268",
+      "inputs": {
+        ".codex/scripts/forge.sh": "a31b1ce023d9355695aafea19665d44d7da8a27dc8beae4fc4ad7d75327cec29"
+      },
+      "outputs": {
+        ".codex/scripts/forge.sh": "192144ed8e21fbbdbb2145a358451642b67dc1573790048b2ffcfc20fda59f72"
+      }
     }
   ],
   "orchestrator": {
