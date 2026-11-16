@@ -44,6 +44,16 @@
       "outputs": {
         ".codex/scripts/forge.sh": "192144ed8e21fbbdbb2145a358451642b67dc1573790048b2ffcfc20fda59f72"
       }
+    },
+    {
+      "path": "harness/patches/forge-pr-update.patch",
+      "sha256": "5656ad7931290127ebe70b960c866b62e38223ac99b00cf3803ba0fd57adb048",
+      "inputs": {
+        ".codex/scripts/forge.sh": "192144ed8e21fbbdbb2145a358451642b67dc1573790048b2ffcfc20fda59f72"
+      },
+      "outputs": {
+        ".codex/scripts/forge.sh": "f013b9f6058006bf1c23e76300559473af6ae7e67619aa2b675ca6af21e41027"
+      }
     }
   ],
   "orchestrator": {

@@ -51,6 +51,66 @@ fi
 '''
 
 
+MOCK_UPSERT = r'''source "$FORGE_SCRIPT"
+forge_require_flags() { :; }
+forge_repo_args() {
+  FORGE_REPO_ARGS=()
+  [ -n "${2:-}" ] && FORGE_REPO_ARGS=(--repo "$2")
+}
+forge_api_repo() {
+  FORGE_API_HOST=github.com
+  FORGE_API_PATH="repos/$2"
+}
+forge_description_args() {
+  FORGE_DESCRIPTION_ARGS=()
+  case "$1" in
+    gh) FORGE_DESCRIPTION_ARGS=(--body-file "$3") ;;
+    glab) FORGE_DESCRIPTION_ARGS=(--description-file "$3") ;;
+  esac
+}
+forge_cache_dir() {
+  FORGE_CACHE_DIR="$CACHE_DIR"
+  (umask 077; mkdir -p "$FORGE_CACHE_DIR")
+}
+forge_pr_metadata() {
+  local metadata_calls
+  metadata_calls=$(wc -l < "$METADATA_LOG") || return 1
+  metadata_calls=$((metadata_calls + 1))
+  printf '%s\n' "$*" >> "$METADATA_LOG"
+  if [ "$FIXTURE_SCENARIO" = create ] && [ "$metadata_calls" -eq 1 ]; then
+    printf 'null\n'
+  elif [ "$FIXTURE_SCENARIO" = identity_change ] && [ "$metadata_calls" -eq 2 ]; then
+    printf '{"number":43}\n'
+  else
+    printf '{"number":42}\n'
+  fi
+}
+forge_run() {
+  local mode="$1" cli="$2" arg input=''
+  shift 2
+  printf '%s %s' "$mode" "$cli" >> "$CALL_LOG"
+  for arg in "$@"; do printf ' <%s>' "$arg" >> "$CALL_LOG"; done
+  printf '\n' >> "$CALL_LOG"
+  case "$mode:$cli:$1:$2" in
+    write:gh:api:*)
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = --input ]; then input="$2"; break; fi
+        shift
+      done
+      [ -n "$input" ] || { printf 'missing API input file\n' >&2; return 91; }
+      cp "$input" "$PAYLOAD_CAPTURE" || return $?
+      [ "$FIXTURE_SCENARIO" != update_failure ] || return 73
+      return 0 ;;
+    write:gh:pr:create) return 0 ;;
+    write:glab:mr:update) return 0 ;;
+  esac
+  printf 'unexpected mocked write: %s %s\n' "$cli" "$*" >&2
+  return 92
+}
+forge_pr_upsert "$PLATFORM" 'fixture/project' 'feature/t4' 'development' "$TITLE" "$BODY_FILE"
+'''
+
+
 class ForgeAdapterFixture(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -103,6 +163,32 @@ class ForgeAdapterFixture(unittest.TestCase):
             ['bash', '-c', MOCK_FORGE], cwd=self.root, env=env,
             capture_output=True, text=True,
         )
+
+    def call_upsert(self, *, scenario, platform='github'):
+        self.call_log.write_text('')
+        metadata_log = self.root / 'metadata.log'
+        metadata_log.write_text('')
+        payload_capture = self.root / 'payload.json'
+        body_file = self.root / 'body.md'
+        body_file.write_text('First line\n' + ('Detail line\n' * 1024) + 'Last line\n')
+        title = 'Update "project" title — café'
+        env = dict(
+            os.environ,
+            FORGE_SCRIPT=str(self.forge_script),
+            FIXTURE_SCENARIO=scenario,
+            CALL_LOG=str(self.call_log),
+            METADATA_LOG=str(metadata_log),
+            CACHE_DIR=str(self.root / 'cache'),
+            PAYLOAD_CAPTURE=str(payload_capture),
+            BODY_FILE=str(body_file),
+            TITLE=title,
+            PLATFORM=platform,
+        )
+        result = subprocess.run(
+            ['bash', '-c', MOCK_UPSERT], cwd=self.root, env=env,
+            capture_output=True, text=True,
+        )
+        return result, title, body_file.read_text(), metadata_log, payload_capture
 
     def large_names(self, prefix):
         return [
@@ -230,6 +316,61 @@ class ForgeAdapterFixture(unittest.TestCase):
                     )
                     self.assertNotEqual(result.returncode, 0)
                     self.assertEqual(result.stdout, '')
+
+    def test_github_existing_upsert_patches_exact_title_and_multiline_body(self):
+        result, title, body, metadata_log, payload_capture = self.call_upsert(scenario='update')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(payload_capture.read_text()), {'title': title, 'body': body})
+        writes = [line for line in self.call_log.read_text().splitlines() if line.startswith('write ')]
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(writes[0].startswith(
+            'write gh <api> <repos/fixture/project/pulls/42> '
+            '<--hostname> <github.com> <--method> <PATCH> <--input> '
+        ), writes[0])
+        self.assertNotIn(body, writes[0])
+        self.assertEqual(
+            metadata_log.read_text().splitlines(),
+            ['github fixture/project feature/t4 development'] * 2,
+        )
+
+    def test_github_existing_upsert_failure_propagates_without_retry(self):
+        result, _, _, metadata_log, _ = self.call_upsert(scenario='update_failure')
+
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertEqual(len(self.call_log.read_text().splitlines()), 1)
+        self.assertEqual(
+            metadata_log.read_text().splitlines(),
+            ['github fixture/project feature/t4 development'] * 2,
+        )
+
+    def test_github_existing_upsert_rejects_changed_pr_identity(self):
+        result, _, _, metadata_log, _ = self.call_upsert(scenario='identity_change')
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('Request identity changed during mutation', result.stderr)
+        self.assertEqual(len(self.call_log.read_text().splitlines()), 1)
+        self.assertEqual(len(metadata_log.read_text().splitlines()), 2)
+
+    def test_github_creation_and_gitlab_update_keep_cli_operations(self):
+        result, _, _, metadata_log, _ = self.call_upsert(scenario='create')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        writes = [line for line in self.call_log.read_text().splitlines() if line.startswith('write ')]
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(writes[0].startswith('write gh <pr> <create> '), writes[0])
+        self.assertIn('<--body-file>', writes[0])
+        self.assertEqual(len(metadata_log.read_text().splitlines()), 2)
+
+        result, _, _, metadata_log, _ = self.call_upsert(scenario='gitlab_update', platform='gitlab')
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        writes = [line for line in self.call_log.read_text().splitlines() if line.startswith('write ')]
+        self.assertEqual(len(writes), 1)
+        self.assertTrue(writes[0].startswith('write glab <mr> <update> <42> '), writes[0])
+        self.assertIn('<--description-file>', writes[0])
+        self.assertNotIn('<api>', writes[0])
+        self.assertEqual(len(metadata_log.read_text().splitlines()), 2)
 
 
 if __name__ == '__main__':
