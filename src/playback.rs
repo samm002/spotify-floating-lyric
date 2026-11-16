@@ -91,7 +91,8 @@ impl PlaybackObserver {
                 owner: None,
                 owner_generation: 0,
                 owner_event_revision: 0,
-                property_revision: 0,
+                metadata_revision: 0,
+                status_revision: 0,
                 track_generation: 0,
                 transport_revision: 0,
                 position_revision: 0,
@@ -127,7 +128,8 @@ struct ObserverState {
     owner: Option<String>,
     owner_generation: u64,
     owner_event_revision: u64,
-    property_revision: u64,
+    metadata_revision: u64,
+    status_revision: u64,
     track_generation: u64,
     transport_revision: u64,
     position_revision: u64,
@@ -352,7 +354,8 @@ fn handle_owner_change(inner: &Rc<RefCell<ObserverState>>, owner: Option<String>
         invalidate_owner_work(&mut state);
         state.owner_generation = state.owner_generation.wrapping_add(1);
         state.owner = owner.clone();
-        state.property_revision = state.property_revision.wrapping_add(1);
+        state.metadata_revision = state.metadata_revision.wrapping_add(1);
+        state.status_revision = state.status_revision.wrapping_add(1);
         state.track_generation = state.track_generation.wrapping_add(1);
         state.transport_revision = state.transport_revision.wrapping_add(1);
         state.position_revision = state.position_revision.wrapping_add(1);
@@ -423,21 +426,24 @@ fn invalidate_owner_work(state: &mut ObserverState) {
 }
 
 fn request_properties(inner: &Rc<RefCell<ObserverState>>, owner: String, generation: u64) {
-    let (Some(connection), revision, position_revision, track_generation) = ({
-        let state = inner.borrow();
-        if state.stopped
-            || state.owner_generation != generation
-            || state.owner.as_deref() != Some(&owner)
-        {
-            return;
-        }
-        (
-            state.connection.clone(),
-            state.property_revision,
-            state.position_revision,
-            state.track_generation,
-        )
-    }) else {
+    let (Some(connection), metadata_revision, status_revision, position_revision, track_generation) =
+        ({
+            let state = inner.borrow();
+            if state.stopped
+                || state.owner_generation != generation
+                || state.owner.as_deref() != Some(&owner)
+            {
+                return;
+            }
+            (
+                state.connection.clone(),
+                state.metadata_revision,
+                state.status_revision,
+                state.position_revision,
+                state.track_generation,
+            )
+        })
+    else {
         return;
     };
     let callback_owner = owner.clone();
@@ -458,14 +464,20 @@ fn request_properties(inner: &Rc<RefCell<ObserverState>>, owner: String, generat
                 let Some(inner) = weak.upgrade() else {
                     return;
                 };
-                let current = {
+                let (current, metadata_current, status_current, position_current) = {
                     let state = inner.borrow();
-                    !state.stopped
+                    let current = !state.stopped
                         && state.owner_generation == generation
-                        && state.owner.as_deref() == Some(&callback_owner)
-                        && state.property_revision == revision
-                        && state.position_revision == position_revision
-                        && state.track_generation == track_generation
+                        && state.owner.as_deref() == Some(&callback_owner);
+                    (
+                        current,
+                        state.metadata_revision == metadata_revision
+                            && state.track_generation == track_generation,
+                        state.status_revision == status_revision,
+                        state.position_revision == position_revision
+                            && state.status_revision == status_revision
+                            && state.track_generation == track_generation,
+                    )
                 };
                 if !current {
                     return;
@@ -476,7 +488,30 @@ fn request_properties(inner: &Rc<RefCell<ObserverState>>, owner: String, generat
                             value.get::<(HashMap<String, glib::Variant>,)>()
                         {
                             clear_property_retry(&inner);
-                            apply_full_properties(&inner, &properties);
+                            apply_full_properties(
+                                &inner,
+                                &properties,
+                                metadata_current,
+                                status_current,
+                                position_current,
+                            );
+                            let incomplete = {
+                                let state = inner.borrow();
+                                (!metadata_current
+                                    && state.snapshot.title.is_none()
+                                    && state.snapshot.track_id.is_none())
+                                    || (!status_current
+                                        && state.snapshot.status == PlaybackStatus::Unknown)
+                                    || (!position_current
+                                        && state.snapshot.position_us.is_none()
+                                        && matches!(
+                                            state.snapshot.status,
+                                            PlaybackStatus::Playing | PlaybackStatus::Paused
+                                        ))
+                            };
+                            if incomplete {
+                                request_properties(&inner, callback_owner, generation);
+                            }
                         } else {
                             set_availability(
                                 &inner,
@@ -528,7 +563,14 @@ fn on_properties_changed(
         if state.stopped || state.owner_generation != generation || state.owner.is_none() {
             return;
         }
-        state.property_revision = state.property_revision.wrapping_add(1);
+        if changed.contains_key("Metadata") || invalidated.iter().any(|key| key == "Metadata") {
+            state.metadata_revision = state.metadata_revision.wrapping_add(1);
+        }
+        if changed.contains_key("PlaybackStatus")
+            || invalidated.iter().any(|key| key == "PlaybackStatus")
+        {
+            state.status_revision = state.status_revision.wrapping_add(1);
+        }
         for key in &invalidated {
             match key.as_str() {
                 "Metadata" => {
@@ -601,25 +643,33 @@ fn on_seeked(inner: &Rc<RefCell<ObserverState>>, generation: u64, parameters: &g
 fn apply_full_properties(
     inner: &Rc<RefCell<ObserverState>>,
     properties: &HashMap<String, glib::Variant>,
+    accept_metadata: bool,
+    accept_status: bool,
+    accept_position: bool,
 ) {
     let (track_changed, has_position) = {
         let mut state = inner.borrow_mut();
-        let track_changed = set_metadata(
-            &mut state,
-            properties
-                .get("Metadata")
-                .map(parse_metadata)
-                .unwrap_or_default(),
-            false,
-        );
-        set_status(
-            &mut state,
-            properties
-                .get("PlaybackStatus")
-                .map(parse_status)
-                .unwrap_or(PlaybackStatus::Unknown),
-        );
-        let position = properties.get("Position").and_then(parse_position);
+        let track_changed = accept_metadata
+            && set_metadata(
+                &mut state,
+                properties
+                    .get("Metadata")
+                    .map(parse_metadata)
+                    .unwrap_or_default(),
+                false,
+            );
+        if accept_status {
+            set_status(
+                &mut state,
+                properties
+                    .get("PlaybackStatus")
+                    .map(parse_status)
+                    .unwrap_or(PlaybackStatus::Unknown),
+            );
+        }
+        let position = accept_position
+            .then(|| properties.get("Position").and_then(parse_position))
+            .flatten();
         if let Some(position) = position {
             state.position_revision = state.position_revision.wrapping_add(1);
             cancel_position_read(&mut state);

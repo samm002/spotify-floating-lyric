@@ -193,6 +193,91 @@ fn observes_owner_properties_seek_polling_and_replacement_on_private_bus() {
 
     drop(observer);
     drop(replacement);
+
+    check_pending_getall_keeps_metadata_when_status_signal_arrives();
+    check_metadata_refresh_survives_a_newer_position_reply();
+}
+
+fn check_pending_getall_keeps_metadata_when_status_signal_arrives() {
+    let bus = PrivateBus::start();
+    let observer_connection = bus.connect();
+    let latest = Rc::new(RefCell::new(PlaybackSnapshot::default()));
+    let callback_latest = Rc::clone(&latest);
+    let observer = PlaybackObserver::from_connection(observer_connection, move |snapshot| {
+        *callback_latest.borrow_mut() = snapshot;
+    });
+
+    wait_for("absent Spotify is reported", || {
+        latest.borrow().availability == Availability::Disconnected
+    });
+
+    let first = FakeMpris::start(&bus, "Delayed initial title", "Playing", 4_000_000);
+    first.delay_next_get_all(Duration::from_millis(350));
+    wait_for("initial GetAll is pending", || first.get_all_reads() == 1);
+    first.set_status_and_emit("Paused");
+
+    wait_for(
+        "delayed initial GetAll fills metadata and preserves newer status",
+        || {
+            let snapshot = latest.borrow();
+            snapshot.availability == Availability::Connected
+                && snapshot.title.as_deref() == Some("Delayed initial title")
+                && snapshot.status == PlaybackStatus::Paused
+        },
+    );
+    assert_eq!(latest.borrow().status, PlaybackStatus::Paused);
+
+    drop(observer);
+    drop(first);
+}
+
+fn check_metadata_refresh_survives_a_newer_position_reply() {
+    let bus = PrivateBus::start();
+    let observer_connection = bus.connect();
+    let latest = Rc::new(RefCell::new(PlaybackSnapshot::default()));
+    let callback_latest = Rc::clone(&latest);
+    let observer = PlaybackObserver::from_connection(observer_connection, move |snapshot| {
+        *callback_latest.borrow_mut() = snapshot;
+    });
+
+    wait_for("absent Spotify is reported", || {
+        latest.borrow().availability == Availability::Disconnected
+    });
+
+    let first = FakeMpris::start(&bus, "Original title", "Playing", 4_000_000);
+    wait_for("initial owner state is acquired", || {
+        let snapshot = latest.borrow();
+        snapshot.availability == Availability::Connected
+            && snapshot.title.as_deref() == Some("Original title")
+            && snapshot.status == PlaybackStatus::Playing
+    });
+
+    let position_reads_before = first.position_reads();
+    first.set_position_without_signal(8_000_000);
+    first.delay_next_get_all(Duration::from_millis(1_800));
+    first.set_title_and_invalidate("Refreshed metadata title");
+
+    wait_for("metadata refresh GetAll is pending", || {
+        first.get_all_reads() >= 2
+    });
+    wait_for(
+        "newer Position reply arrives during delayed metadata refresh",
+        || {
+            first.position_reads() > position_reads_before
+                && latest.borrow().position_us == Some(8_000_000)
+        },
+    );
+    wait_for(
+        "delayed GetAll completes metadata without replacing Position",
+        || {
+            let snapshot = latest.borrow();
+            snapshot.title.as_deref() == Some("Refreshed metadata title")
+                && snapshot.position_us == Some(8_000_000)
+        },
+    );
+
+    drop(observer);
+    drop(first);
 }
 
 #[derive(Clone, Copy)]
@@ -211,6 +296,8 @@ struct FakeState {
     position_reads: usize,
     next_position_action: PositionAction,
     metadata_change_before_reply: Option<String>,
+    get_all_reads: usize,
+    next_get_all_delay: Duration,
 }
 
 impl FakeState {
@@ -231,12 +318,100 @@ impl FakeState {
         ])
         .to_variant()
     }
+
+    fn properties(&self) -> HashMap<String, glib::Variant> {
+        HashMap::from([
+            ("PlaybackStatus".to_owned(), self.status.to_variant()),
+            ("Metadata".to_owned(), self.metadata()),
+            ("Position".to_owned(), self.position.to_variant()),
+        ])
+    }
+}
+
+fn fake_property(
+    state: &Rc<RefCell<FakeState>>,
+    connection: &gio::DBusConnection,
+    name: &str,
+) -> glib::Variant {
+    match name {
+        "PlaybackStatus" => state.borrow().status.to_variant(),
+        "Metadata" => {
+            let (reply_metadata, changed_metadata) = {
+                let mut state = state.borrow_mut();
+                let reply_metadata = state.metadata();
+                let changed_metadata = state.metadata_change_before_reply.take().map(|title| {
+                    state.title = title;
+                    state.metadata()
+                });
+                (reply_metadata, changed_metadata)
+            };
+            if let Some(changed) = changed_metadata {
+                emit_properties_changed(
+                    connection,
+                    HashMap::from([("Metadata".to_owned(), changed)]),
+                    Vec::new(),
+                );
+            }
+            reply_metadata
+        }
+        "Position" => {
+            let (reply_position, action) = {
+                let mut state = state.borrow_mut();
+                state.position_reads += 1;
+                let reply_position = state.position;
+                let action =
+                    std::mem::replace(&mut state.next_position_action, PositionAction::None);
+                match action {
+                    PositionAction::SwitchTrack => {
+                        state.title = "Second original title".to_owned();
+                        state.track = "/track/two";
+                        state.position = 6_000_000;
+                    }
+                    PositionAction::Pause => {
+                        state.status = "Paused".to_owned();
+                    }
+                    PositionAction::Seek => {
+                        state.position = 33_000_000;
+                    }
+                    PositionAction::None => {}
+                }
+                (reply_position, action)
+            };
+            match action {
+                PositionAction::SwitchTrack => emit_properties_changed(
+                    connection,
+                    HashMap::from([("Metadata".to_owned(), state.borrow().metadata())]),
+                    Vec::new(),
+                ),
+                PositionAction::Pause => emit_properties_changed(
+                    connection,
+                    HashMap::from([("PlaybackStatus".to_owned(), "Paused".to_variant())]),
+                    Vec::new(),
+                ),
+                PositionAction::Seek => {
+                    connection
+                        .emit_signal(
+                            None,
+                            OBJECT_PATH,
+                            PLAYER,
+                            "Seeked",
+                            Some(&(33_000_000_i64,).to_variant()),
+                        )
+                        .expect("emit private in-flight Seeked signal");
+                }
+                PositionAction::None => {}
+            }
+            reply_position.to_variant()
+        }
+        other => panic!("unexpected fake MPRIS property: {other}"),
+    }
 }
 
 struct FakeMpris {
     connection: gio::DBusConnection,
     state: Rc<RefCell<FakeState>>,
     registration: Option<gio::RegistrationId>,
+    properties_registration: Option<gio::RegistrationId>,
     owns_name: bool,
 }
 
@@ -264,11 +439,14 @@ impl FakeMpris {
             position_reads: 0,
             next_position_action: PositionAction::None,
             metadata_change_before_reply: None,
+            get_all_reads: 0,
+            next_get_all_delay: Duration::ZERO,
         }));
         Self {
             connection,
             state,
             registration: None,
+            properties_registration: None,
             owns_name: false,
         }
     }
@@ -286,87 +464,89 @@ impl FakeMpris {
         let registration = self
             .connection
             .register_object(OBJECT_PATH, &interface)
-            .property(move |_, _, _, _, name| match name {
-                "PlaybackStatus" => callback_state.borrow().status.to_variant(),
-                "Metadata" => {
-                    let (reply_metadata, changed_metadata) = {
+            .property(move |_, _, _, _, name| {
+                fake_property(&callback_state, &callback_connection, name)
+            })
+            .build()
+            .expect("register fake Player object");
+        self.registration = Some(registration);
+
+        let properties_xml = r#"
+<node>
+  <interface name="org.freedesktop.DBus.Properties">
+    <method name="Get">
+      <arg name="interface_name" type="s" direction="in"/>
+      <arg name="property_name" type="s" direction="in"/>
+      <arg name="value" type="v" direction="out"/>
+    </method>
+    <method name="GetAll">
+      <arg name="interface_name" type="s" direction="in"/>
+      <arg name="properties" type="a{sv}" direction="out"/>
+    </method>
+  </interface>
+</node>
+"#;
+        let properties_node = gio::DBusNodeInfo::for_xml(properties_xml)
+            .expect("valid fake Properties interface XML");
+        let properties_interface = properties_node
+            .lookup_interface(PROPERTIES)
+            .expect("Properties interface exists in test XML");
+        let callback_state = Rc::clone(&self.state);
+        let callback_connection = self.connection.clone();
+        self.properties_registration = Some(
+            self.connection
+                .register_object(OBJECT_PATH, &properties_interface)
+                .method_call(move |_, _, _, interface, method, parameters, invocation| {
+                    assert_eq!(interface, Some(PROPERTIES));
+                    if method == "Get" {
+                        let Some((requested_interface, property)) =
+                            parameters.get::<(String, String)>()
+                        else {
+                            panic!("Get interface/property parameters were malformed");
+                        };
+                        assert_eq!(requested_interface, PLAYER);
+                        let value = fake_property(&callback_state, &callback_connection, &property);
+                        invocation.return_value(Some(&(value,).to_variant()));
+                        return;
+                    }
+                    assert_eq!(method, "GetAll");
+                    let Some((requested_interface,)) = parameters.get::<(String,)>() else {
+                        panic!("GetAll interface parameter was malformed");
+                    };
+                    assert_eq!(requested_interface, PLAYER);
+
+                    let (properties, delay, changed_metadata) = {
                         let mut state = callback_state.borrow_mut();
-                        let reply_metadata = state.metadata();
+                        state.get_all_reads += 1;
+                        let properties = state.properties();
                         let changed_metadata =
                             state.metadata_change_before_reply.take().map(|title| {
                                 state.title = title;
                                 state.metadata()
                             });
-                        (reply_metadata, changed_metadata)
+                        let delay =
+                            std::mem::replace(&mut state.next_get_all_delay, Duration::ZERO);
+                        (properties, delay, changed_metadata)
                     };
-                    if let Some(changed) = changed_metadata {
+                    if let Some(metadata) = changed_metadata {
                         emit_properties_changed(
                             &callback_connection,
-                            HashMap::from([("Metadata".to_owned(), changed)]),
+                            HashMap::from([("Metadata".to_owned(), metadata)]),
                             Vec::new(),
                         );
                     }
-                    reply_metadata
-                }
-                "Position" => {
-                    let (reply_position, action) = {
-                        let mut state = callback_state.borrow_mut();
-                        state.position_reads += 1;
-                        let reply_position = state.position;
-                        let action = std::mem::replace(
-                            &mut state.next_position_action,
-                            PositionAction::None,
-                        );
-                        match action {
-                            PositionAction::SwitchTrack => {
-                                state.title = "Second original title".to_owned();
-                                state.track = "/track/two";
-                                state.position = 6_000_000;
-                            }
-                            PositionAction::Pause => {
-                                state.status = "Paused".to_owned();
-                            }
-                            PositionAction::Seek => {
-                                state.position = 33_000_000;
-                            }
-                            PositionAction::None => {}
-                        }
-                        (reply_position, action)
-                    };
-                    match action {
-                        PositionAction::SwitchTrack => emit_properties_changed(
-                            &callback_connection,
-                            HashMap::from([(
-                                "Metadata".to_owned(),
-                                callback_state.borrow().metadata(),
-                            )]),
-                            Vec::new(),
-                        ),
-                        PositionAction::Pause => emit_properties_changed(
-                            &callback_connection,
-                            HashMap::from([("PlaybackStatus".to_owned(), "Paused".to_variant())]),
-                            Vec::new(),
-                        ),
-                        PositionAction::Seek => {
-                            callback_connection
-                                .emit_signal(
-                                    None,
-                                    OBJECT_PATH,
-                                    PLAYER,
-                                    "Seeked",
-                                    Some(&(33_000_000_i64,).to_variant()),
-                                )
-                                .expect("emit private in-flight Seeked signal");
-                        }
-                        PositionAction::None => {}
+                    let response = (properties,).to_variant();
+                    if delay.is_zero() {
+                        invocation.return_value(Some(&response));
+                    } else {
+                        glib::timeout_add_local_once(delay, move || {
+                            invocation.return_value(Some(&response));
+                        });
                     }
-                    reply_position.to_variant()
-                }
-                other => panic!("unexpected fake MPRIS property: {other}"),
-            })
-            .build()
-            .expect("register fake Player object");
-        self.registration = Some(registration);
+                })
+                .build()
+                .expect("register fake Properties.GetAll method"),
+        );
     }
 
     fn request_name(&mut self) {
@@ -412,6 +592,14 @@ impl FakeMpris {
 
     fn position_reads(&self) -> usize {
         self.state.borrow().position_reads
+    }
+
+    fn get_all_reads(&self) -> usize {
+        self.state.borrow().get_all_reads
+    }
+
+    fn delay_next_get_all(&self, delay: Duration) {
+        self.state.borrow_mut().next_get_all_delay = delay;
     }
 
     fn set_position_without_signal(&self, position: i64) {
@@ -486,6 +674,9 @@ impl Drop for FakeMpris {
     fn drop(&mut self) {
         self.release_name();
         if let Some(registration) = self.registration.take() {
+            let _ = self.connection.unregister_object(registration);
+        }
+        if let Some(registration) = self.properties_registration.take() {
             let _ = self.connection.unregister_object(registration);
         }
     }
