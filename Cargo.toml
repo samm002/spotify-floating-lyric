@@ -1,0 +1,11 @@
+[package]
+name = "spotify-floating-lyric"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+description = "A GTK4 floating lyrics window for Ubuntu"
+license = "MIT"
+repository = "https://github.com/samm002/spotify-floating-lyric"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11.5" }

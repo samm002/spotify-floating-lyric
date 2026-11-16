@@ -1,0 +1,8 @@
+/target/
+/.tools/
+/.codex/
+/.agents/
+/state.json
+/.worktrees/
+/.goal-review/
+__pycache__/

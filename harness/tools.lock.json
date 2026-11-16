@@ -1,0 +1,12 @@
+{
+  "rtk": {
+    "repository": "https://github.com/rtk-ai/rtk",
+    "version": "1.2.0",
+    "edition": "oss",
+    "target": "x86_64-unknown-linux-musl",
+    "archive_url": "https://github.com/rtk-ai/rtk/releases/download/v1.2.0/rtk-oss-x86_64-unknown-linux-musl.tar.gz",
+    "archive_sha256": "a28407dc13038bdc9c2a1f5a047b0c636e0c1d495b15523576e2adb992a06a17",
+    "binary": ".tools/bin/rtk",
+    "license": ".tools/licenses/rtk-LICENSE"
+  }
+}

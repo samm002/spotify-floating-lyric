@@ -1,0 +1,60 @@
+--- a/.codex/scripts/forge.sh
++++ b/.codex/scripts/forge.sh
+@@ -375,7 +375,7 @@
+ 
+ forge_pr_upsert() {
+   local platform="${1:-}" repo="${2:-}" branch="${3:-}" base="${4:-}" title="${5:-}" file="${6:-}"
+-  local before after cli sub number rc=0 pending key
++  local before after cli sub number rc=0 pending key payload=''
+   [ -n "$title" ] && [ -r "$file" ] || { forge_error usage 'Title and readable body file required'; return 1; }
+   before=$(forge_pr_metadata "$platform" "$repo" "$branch" "$base") || return 1
+   case "$platform" in github) cli=gh ;; gitlab) cli=glab ;; *) return 1 ;; esac
+@@ -393,13 +393,28 @@
+     fi
+   else
+     number=$(jq -r .number <<< "$before") || return 1
+-    if [ "$cli" = gh ]; then sub='pr edit'; args=(pr edit "$number" --title "$title")
+-    else sub='mr update'; args=(mr update "$number" --title "$title"); fi
+-    forge_require_flags "$cli" "$sub" --title --repo || return 1
+-  fi
+-  forge_description_args "$cli" "$sub" "$file" || return 1
+-  args+=("${FORGE_DESCRIPTION_ARGS[@]}" "${FORGE_REPO_ARGS[@]}")
++    if [ "$cli" = gh ]; then
++      sub=api
++      forge_require_flags gh api --hostname --method --input || return 1
++      forge_api_repo gh "$repo" || return 1
++    else
++      sub='mr update'
++      args=(mr update "$number" --title "$title")
++      forge_require_flags glab "$sub" --title --repo || return 1
++    fi
++  fi
++  if [ "$before" = null ] || [ "$cli" = glab ]; then
++    forge_description_args "$cli" "$sub" "$file" || return 1
++    args+=("${FORGE_DESCRIPTION_ARGS[@]}" "${FORGE_REPO_ARGS[@]}")
++  fi
+   forge_cache_dir || return 1
++  if [ "$before" != null ] && [ "$cli" = gh ]; then
++    payload=$(mktemp "$FORGE_CACHE_DIR/pr-update.XXXXXX") || return 1
++    jq -cn --arg title "$title" --rawfile body "$file" '{title:$title,body:$body}' > "$payload" || {
++      rm -f "$payload"
++      return 1
++    }
++  fi
+   key=$(printf '%s\n' "$platform" "$repo" "$branch" "$base" | git hash-object --stdin) || return 1
+   pending="$FORGE_CACHE_DIR/create-$key.pending"
+   if [ "$before" = null ]; then
+@@ -409,7 +424,12 @@
+     jq -cn --arg repo "$repo" --arg head "$branch" --arg base "$base" --arg title "$title"       '{operation:"create",repo:$repo,head:$head,base:$base,title:$title,state:"pending"}' > "$pending/operation.json" || return 1
+   fi
+   # Creation output is unstructured; metadata is always re-read, even on error.
+-  forge_run write "$cli" "${args[@]}" >/dev/null || rc=$?
++  if [ "$before" != null ] && [ "$cli" = gh ]; then
++    forge_run write gh api "$FORGE_API_PATH/pulls/$number" --hostname "$FORGE_API_HOST" --method PATCH --input "$payload" >/dev/null || rc=$?
++    rm -f "$payload"
++  else
++    forge_run write "$cli" "${args[@]}" >/dev/null || rc=$?
++  fi
+   if [ "$before" = null ] && [ "$rc" -ne 0 ]; then
+     case "${FORGE_LAST_ERROR_CATEGORY:-unknown}" in
+       auth|permission|validation|capability|not_found) rm -rf "$pending" ;;
